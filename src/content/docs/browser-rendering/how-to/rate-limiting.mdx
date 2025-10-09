@@ -5,179 +5,24 @@ sidebar:
   order: 5
 ---
 
-import { TypeScriptExample } from "~/components";
+## Example: Handling 429 Rate Limits with Retry-After Header
 
-When using the Browser Rendering REST API, it is important to respect the [rate limits](/browser-rendering/platform/limits/) to ensure your requests are processed successfully. This guide demonstrates how to implement rate limiting in your applications to stay within the allowed request limits.
+```js
+const response = await fetch('https://api.cloudflare.com/client/v4/accounts/<accountId>/browser-rendering/content', {
+    method: 'POST',
+    headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer <your-token>',
+    },
+    body: JSON.stringify({ url: 'https://example.com' })
+});
 
-Exceeding these limits will result in HTTP 429 (Too Many Requests) responses. Implementing proper rate limiting ensures your application handles these limits gracefully and maximizes throughput without hitting rate limit errors.
+if (response.status === 429) {
+    const retryAfter = response.headers.get('Retry-After');
+    console.log(`Rate limited. Waiting ${retryAfter} seconds...`);
+    await new Promise(resolve => setTimeout(resolve, retryAfter * 1000));
 
-## Rate limiting strategies
-
-### Token bucket algorithm
-
-The examples below use a token bucket algorithm, which allows for burst requests up to the limit while maintaining the average rate over time. This approach is ideal for Browser Rendering API calls because it:
-
-- Smooths out request patterns over time
-- Provides predictable behavior under load
-
-## Implementation examples
-
-### TypeScript SDK implementation
-
-<TypeScriptExample>
-```typescript
-import Cloudflare from "cloudflare";
-
-class RateLimitedBrowserClient {
-  private client: Cloudflare;
-  private accountId: string;
-  private requestsPerSecond: number;
-  private tokens: number;
-  private lastRefill: number;
-
-  constructor(apiToken: string, accountId: string, requestsPerSecond: number = 1) {
-    this.client = new Cloudflare({ apiToken });
-    this.accountId = accountId;
-    this.requestsPerSecond = requestsPerSecond;
-    this.tokens = requestsPerSecond;
-    this.lastRefill = Date.now();
-  }
-
-  // Refill tokens based on elapsed time
-  private refillTokens(): void {
-    const now = Date.now();
-    const timePassed = (now - this.lastRefill) / 1000;
-    const tokensToAdd = timePassed * this.requestsPerSecond;
-
-    this.tokens = Math.min(this.requestsPerSecond, this.tokens + tokensToAdd);
-    this.lastRefill = now;
-  }
-
-  // Wait until a token is available
-  private async waitForToken(): Promise<void> {
-    this.refillTokens();
-
-    if (this.tokens >= 1) {
-      this.tokens -= 1;
-      return;
-    }
-
-    // Calculate wait time for next token
-    const waitTime = (1 - this.tokens) / this.requestsPerSecond * 1000;
-    await new Promise(resolve => setTimeout(resolve, waitTime));
-
-    // Recursively check again
-    return this.waitForToken();
-  }
-
-  // Make a rate-limited request to extract content
-  async extractContent(options: ContentOptions): Promise<string> {
-    await this.waitForToken();
-
-    return await this.client.browserRendering.content.create({
-      account_id: this.accountId,
-      ...options
-    });
-  }
-
-  // Make a rate-limited request to generate PDF
-  async generatePdf(options: PdfOptions): Promise<Response> {
-    await this.waitForToken();
-
-    return await this.client.browserRendering.pdf.create({
-      account_id: this.accountId,
-      ...options
-    });
-  }
-}
-
-async function main() {
-  // For Workers Free plan (1 request per second)
-  const client = new RateLimitedBrowserClient(
-    process.env.CLOUDFLARE_API_TOKEN!,
-    process.env.CLOUDFLARE_ACCOUNT_ID!,
-    1 // requests per second
-  );
-
-  // For Workers Paid plan, increase the rate limit
-  // const client = new RateLimitedBrowserClient(
-  //   process.env.CLOUDFLARE_API_TOKEN!,
-  //   process.env.CLOUDFLARE_ACCOUNT_ID!,
-  //   3 // requests per second
-  // );
-
-  const urls = [
-    'https://example.com',
-    'https://cloudflare.com',
-    'https://developers.cloudflare.com'
-  ];
-
-  for (let i = 0; i < urls.length; i++) {
-    try {
-      console.log(`Extracting content ${i + 1}/${urls.length}: ${urls[i]}`);
-
-      const content = await client.extractContent({
-        url: urls[i]
-      });
-
-      // Do something with the content
-			console.log(content);
-
-    } catch (error) {
-      console.error(`Error extracting content for ${urls[i]}:`, (error as Error).message);
-    }
-  }
+    // Retry the request
+    const retryResponse = await fetch(/* same request as above */);
 }
 ```
-</TypeScriptExample>
-## Best practices
-
-### 1. Configure rate limits based on your plan
-
-Always set the `requestsPerSecond` parameter according to your Cloudflare plan:
-
-- **Workers Free**: Set to `1` request per second
-- **Workers Paid**: Set to `3` requests per second (or lower if you prefer more conservative limits)
-
-### 2. Handle rate limit errors gracefully
-
-Even with client-side rate limiting, you should handle HTTP 429 responses:
-
-```typescript
-async function makeRequestWithRetry<T>(
-  client: RateLimitedBrowserClient,
-  requestFn: () => Promise<T>,
-  maxRetries: number = 3
-): Promise<T> {
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      return await requestFn();
-    } catch (error) {
-      if ((error as Error).message.includes('429') && attempt < maxRetries) {
-        const backoffTime = Math.pow(2, attempt) * 1000; // Exponential backoff
-        console.log(`Rate limited, retrying in ${backoffTime}ms...`);
-        await new Promise(resolve => setTimeout(resolve, backoffTime));
-        continue;
-      }
-      throw error;
-    }
-  }
-  throw new Error('Max retries exceeded');
-}
-```
-### 3. Monitor your usage
-
-Use the `X-Browser-Ms-Used` header returned in API responses to monitor your browser time consumption:
-
-```typescript
-const response = await client.extractContent(options);
-const browserTimeUsed = response.headers.get('X-Browser-Ms-Used');
-console.log(`Browser time used: ${browserTimeUsed}ms`);
-```
-
-## Related resources
-
-- [Browser Rendering limits](/browser-rendering/platform/limits/) - Learn about all Browser Rendering limits
-- [REST API reference](/api/resources/browser_rendering/) - Complete API documentation
-- [Content endpoint](/browser-rendering/rest-api/content-endpoint/) - Extract content with rate limiting
-- [PDF endpoint](/browser-rendering/rest-api/pdf-endpoint/) - Generate PDFs with rate limiting
